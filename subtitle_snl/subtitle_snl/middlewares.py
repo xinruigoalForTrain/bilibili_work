@@ -75,6 +75,7 @@ class RandomUserAgentMiddleWare(object):
         self.res_temp = ''     # 递归调用最终得到的值会被前面调用的值（None）覆盖
         self.https_list = []
         self.http_list = []
+        self.ua = UserAgent()
 
     def __del__(self):
         self.connection.close()
@@ -82,12 +83,11 @@ class RandomUserAgentMiddleWare(object):
 
     def process_request(self, request, spider):
         print(f"spider name:{spider.name},spider request:{request.url}, url type is {type(request.url)}")
-        ua = UserAgent()
-        fake_ua = ua.random
+        fake_ua = self.ua.random
         print(f"fake-ua is :{fake_ua}")
         proxy_kind = request.url.split(':')[0].strip()
-        # proxy = self.get_random_proxy(request.url)
-        proxy = self.get_u_proxy(request.url)
+        # proxy = self.get_random_proxy(request.url, fake_ua)
+        proxy = self.get_u_proxy(request.url, fake_ua)
         print(f'the proxy will be:{proxy}，kind of proxy is {type(proxy)}')
         if request.url == 'https://search.bilibili.com/all?keyword=snl%20%20cc%E5%AD%97%E5%B9%95':
             # profile = webdriver.FirefoxProfile()
@@ -106,6 +106,14 @@ class RandomUserAgentMiddleWare(object):
             chrome_opt.add_argument('--no-sandbox')     # 解决DevToolsActivePort文件不存在导致报错？
             chrome_opt.add_argument('--incognito')     # 无痕模式
             chrome_opt.add_argument('--disable-gpu')     # 可应对部分情况下的超时
+            prefs = {
+                "profile.default_content_setting_values":
+                    {
+                        "notifications": 2
+                    },
+                "profile.managed_default_content_settings.images": 2
+            }
+            chrome_opt.add_experimental_option("prefs", prefs)  # 设置浏览器不出现通知
             chrome_opt.add_experimental_option("excludeSwitches", ['enable-automation'])     # 不太明白
             # https不受信任ssl问题
             chrome_opt.add_argument("service_args = ['–ignore - ssl - errors = true', '–ssl - protocol = TLSv1']")
@@ -161,7 +169,7 @@ class RandomUserAgentMiddleWare(object):
         proxies_list = proxy_data['data']
         return proxies_list
 
-    def get_u_proxy(self, url):
+    def get_u_proxy(self, url, fake_ua):
         proxies_kind = url.split(':')[0].strip()
         proxies_list = []     # 不能在此处进行任何优先赋值
         if proxies_kind == 'https':
@@ -179,11 +187,11 @@ class RandomUserAgentMiddleWare(object):
         ip_n = pre_proxy['ip']
         port_n = pre_proxy['port']
         # u_proxy = {'https': f'https://{ip_n}:{port_n}'}
-        u_proxy = self.check_ip_valid(ip_n, port_n, proxies_kind, url)
+        u_proxy = self.check_ip_valid(ip_n, port_n, proxies_kind, url, fake_ua)
         if not u_proxy:
             proxies_list.pop(0)     # 前方使用浅拷贝，则此处可直接从现存列表中移除
             print(f"{pre_proxy} pop from proxies_list")
-            self.get_u_proxy(url)
+            self.get_u_proxy(url, fake_ua)
         else:
             self.res_temp = u_proxy
         u_proxy = self.res_temp
@@ -192,7 +200,7 @@ class RandomUserAgentMiddleWare(object):
     """
         从数据库中维护的IP池获取代理
     """
-    def get_random_proxy(self, url):
+    def get_random_proxy(self, url, fake_ua):
         proxy_kind = url.split(':')[0].strip()
         # sql = f'select id,ip,port from proxy_pool where `type` = "1" and kind = "{proxy_kind}" order by `status` desc ,rand() limit 1'
         # 实际工作中请勿对status排序（或取得更多有效代理时可以）
@@ -207,12 +215,12 @@ class RandomUserAgentMiddleWare(object):
             return None
         ip = ip_info[1]
         port = ip_info[2]
-        res = self.check_ip_valid(ip, port, proxy_kind, url)
+        res = self.check_ip_valid(ip, port, proxy_kind, url, fake_ua)
         if not res:
             sql_del_ip = f'delete from proxy_pool where id = {ip_info[0]}'
             self.cursor.execute(sql_del_ip)
             print(f'invalid Ip {ip_info[0]} have deleted')
-            self.get_random_proxy(url)
+            self.get_random_proxy(url, fake_ua)
         else:
             try:
                 # print(f'the effective proxy is {res},id = {ip_info[0]} ')
@@ -230,16 +238,17 @@ class RandomUserAgentMiddleWare(object):
     """
         检验代理是否有效
     """
-    def check_ip_valid(self, ip, port, proxy_kind, url):
+    def check_ip_valid(self, ip, port, proxy_kind, url, fake_ua):
         domain = re.search('https?://[^/]*/', url).group()     # 需要验证的地址(只验证主站)
         print(f'main site is:{domain}')
+        headers = {'user-agent':fake_ua}
         proxy_dict = {'http': f"http://{ip}:{port}"}
         if proxy_kind == "https":
             proxy_dict = {'https': f"https://{ip}:{port}"}
         retry_times = 0
         while True:
             try:
-                resp = requests.get(domain, proxies=proxy_dict, timeout=(10, 25), stream=True)
+                resp = requests.get(domain, proxies=proxy_dict, headers=headers, timeout=(10, 25), stream=True)
             except Exception as e:
                 if retry_times > 5:
                     return None
